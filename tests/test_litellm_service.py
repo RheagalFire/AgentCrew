@@ -158,3 +158,94 @@ def test_model_list_empty_by_default():
 
     assert isinstance(LITELLM_MODELS, list)
     assert len(LITELLM_MODELS) == 0
+
+
+def test_provider_prefixed_model_string(service):
+    assert "/" in service.model
+
+
+# ---------------------------------------------------------------------------
+# Error handling tests (exceptions propagate like other AgentCrew providers)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_auth_error_propagates(service):
+    """Auth errors from litellm propagate to the framework."""
+    exc = Exception("AuthenticationError: Invalid API key")
+    _fake_litellm.acompletion = mock.AsyncMock(side_effect=exc)
+    with pytest.raises(Exception, match="Invalid API key"):
+        await service.stream_assistant_response([{"role": "user", "content": "Hi"}])
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_propagates(service):
+    """Rate limit errors from litellm propagate to the framework."""
+    exc = Exception("RateLimitError: 429 Too Many Requests")
+    _fake_litellm.acompletion = mock.AsyncMock(side_effect=exc)
+    with pytest.raises(Exception, match="429"):
+        await service.stream_assistant_response([{"role": "user", "content": "Hi"}])
+
+
+@pytest.mark.asyncio
+async def test_timeout_propagates(service):
+    """Timeout errors from litellm propagate to the framework."""
+    exc = Exception("Timeout: Request timed out")
+    _fake_litellm.acompletion = mock.AsyncMock(side_effect=exc)
+    with pytest.raises(Exception, match="timed out"):
+        await service.stream_assistant_response([{"role": "user", "content": "Hi"}])
+
+
+@pytest.mark.asyncio
+async def test_not_found_propagates(service):
+    """Model not found errors propagate to the framework."""
+    exc = Exception("NotFoundError: Model openai/nonexistent not found")
+    _fake_litellm.acompletion = mock.AsyncMock(side_effect=exc)
+    with pytest.raises(Exception, match="not found"):
+        await service.stream_assistant_response([{"role": "user", "content": "Hi"}])
+
+
+@pytest.mark.asyncio
+async def test_validate_spec_empty_content(service):
+    """validate_spec returns empty string when content is None."""
+    resp = mock.MagicMock()
+    resp.choices = [mock.MagicMock()]
+    resp.choices[0].message.content = None
+    resp.usage = _fake_usage
+    _fake_litellm.acompletion = mock.AsyncMock(return_value=resp)
+    result = await service.validate_spec("Validate")
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_non_streamable_model(service):
+    """Non-streamable models return AsyncIterator wrapping choices."""
+    from AgentCrew.modules.llm.base import AsyncIterator
+
+    resp = mock.MagicMock()
+    resp.choices = [_fake_choice]
+    resp.usage = _fake_usage
+    _fake_litellm.acompletion = mock.AsyncMock(return_value=resp)
+
+    # Patch _build_stream_params to return non-streamable
+    original_build = service._build_stream_params
+    def mock_build():
+        params, _ = original_build()
+        return params, False
+    service._build_stream_params = mock_build
+
+    result = await service.stream_assistant_response([{"role": "user", "content": "Hi"}])
+    assert isinstance(result, AsyncIterator)
+
+
+@pytest.mark.asyncio
+async def test_process_message_empty_stream(service):
+    """process_message returns empty when stream yields no content."""
+    async def empty_stream():
+        chunk = mock.MagicMock()
+        chunk.choices = []
+        chunk.usage = _fake_usage
+        yield chunk
+
+    _fake_litellm.acompletion = mock.AsyncMock(return_value=empty_stream())
+    result = await service.process_message("Hello")
+    assert result == ""
